@@ -1,0 +1,1 @@
+So rather than writing all the cuda codes manually , better way is to write triton code, that is a lang defined by openai where its written in the python language only and we write that in threadblocks rather than worrying about individual threads  

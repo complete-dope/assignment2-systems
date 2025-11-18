@@ -1,9 +1,14 @@
 // writing custom cuda kernel for gelu operation 
+// nvcc gelu_kernel.cu -o gelu_kernel.o
+// nsys profile -t cuda --stats=true ./gelu_kernel
 
 #include <stdio.h> 
 #include <iostream>
 #include <cuda_runtime.h>
 #include <math.h>
+#include <cuda_fp16.h>
+#include <math_constants.h>
+
 // do I have this lib ?  
 
 using namespace std;
@@ -31,16 +36,21 @@ __global__
 void fused_gelu_kernel(float *x , int N){
     // first step for fusion : load once, reuse v 
     // second step : you are computing v*v*v that same thing is getting computed again and again and  is storing intermediates (so any variable that is local to a thread is stored in the registers)
-    // third step : Using fmaf aka fused multiply addition 
-    // 4th step : using constantexp so that they dont occupy registers
+    // third step : Using fmaf aka fused multiply addition ( this reduces counts)
+    // 4th step : using constantexp so that they dont occupy registers and keep those outside the loop
+    // 5th step : long lived variable, you dont need those and rather we need to avoid there longliveness
+    // 6th step : use the fused (__tanh) operation to avoid spills and cut latency 
+    // immediate consumption that makes sure a variable is not long live in memory : they get used up and they die immediately ! 
+    // still not fused something important is missing  
+
     int thread = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
+    
+    constexpr float a = 0.044715f;
+    constexpr float b = 1.1283f;
+    constexpr float half = 0.5f;
 
     for(int i=thread;i<N;i+=stride){
-        constexpr float a = 0.044715f;
-        constexpr float b = 1.1283f;
-        constexpr float half = 0.5f;
-        constexpr float one  = 1.f;
 
         float v = x[i];
         float v2 = v * v;
@@ -48,10 +58,12 @@ void fused_gelu_kernel(float *x , int N){
 
         float inner = fmaf(a, v3, v);
         float scaled_arg = fmaf(b, inner, 0.f);
+        float t = tanhf(scaled_arg); 
+        float one_plus_t = fmaf(1.f, t, 1.f); 
+        float v_times = v * one_plus_t;
 
-        float t = tanhf(scaled_arg);
-        x[i] = half * v * (one + t);
-
+        // x[i] = half * v * (one + t);
+        x[i] = half * v_times;
     }
 }
 

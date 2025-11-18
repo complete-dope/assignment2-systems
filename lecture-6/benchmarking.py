@@ -126,6 +126,7 @@ from torch.profiler import profile, ProfilerActivity, record_function
 
 def profile(description: str, run: Callable, num_warmups: int = 1, with_stack: bool = False):
     # Warmup
+    print('\n\n'+description)
     for _ in range(num_warmups):
         run()
     if torch.cuda.is_available():
@@ -195,3 +196,81 @@ print(manual_gelu_profile)
 
 pytorch_gelu_profile = profile('pytorch_gelu', run_operation1(16384 , pytorch_gelu))
 print(pytorch_gelu_profile)
+
+manual_time = benchmark("manual_gelu", run_operation1(dim=16384, operation=manual_gelu)) # @inspect manual_time
+pytorch_time = benchmark("pytorch_gelu", run_operation1(dim=16384, operation=pytorch_gelu)) # @inspect pytorch_time
+
+if manual_time is not None and pytorch_time is not None:
+    print('pytorch implementation is almost 10x faster that the manual one')
+
+else:
+    print("Could not compare times - benchmark results were None")
+
+
+
+import triton
+import triton.language as tl
+
+def triton_gelu(x:torch.Tensor):
+    assert x.is_cuda
+    assert x.is_contiguous()
+
+    # allocate output tensor 
+    y = torch.empty_like(x)
+
+    num_elements= x.numel()
+    block_size = 1024 # No. of threads in a block
+    num_blocks = triton.cdiv(num_elements, block_size)
+    
+    triton_gelu_kernel[(num_blocks,)](x, y, num_elements, BLOCK_SIZE=block_size)
+    return y
+
+@triton.jit
+def triton_gelu_kernel(x_ptr, y_ptr, num_elements, BLOCK_SIZE:tl.constexpr):
+    # input is at : x_ptr, output is at y_ptr 
+    # the index of the threadBlock here we find that as pid
+    # only main difference is triton works on vectors, whereas cuda code works on indexes of threads
+    # Here I am working with blocks
+    #        block-0     |      block-1      |      block-2
+    #               BLOCK-SIZE          BLOCK-SIZE
+    
+    pid = tl.program_id(axis=0)  
+    block_start = pid * BLOCK_SIZE
+
+    #offset is a thread block , that tells these many threads are required   
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    mask = offsets < num_elements
+
+    # Read
+    x = tl.load(x_ptr + offsets ,mask = mask) # load this whole vector of values in the vector x
+
+
+    # Approx gelu
+    a = 0.79788456 * (x + 0.044715 * x * x * x)
+    exp = tl.exp(2 * a)
+    tanh = (exp - 1) / (exp + 1)
+    y = 0.5 * x * (1 + tanh)
+
+    tl.store(y_ptr+offsets, y , mask = mask)
+
+
+pytorch_triton_gelu = profile('triton_gelu', run_operation1(16384 , triton_gelu))
+print(pytorch_triton_gelu) # this is faster than the torch implementation 
+
+# GeLU is a nice element-wise operation but problem comes in aggregate operations ( operations that requires aggregation (sum , multiplication of all the values inside an array) that causes the whole problem)
+
+# compiled method for gelu 
+compiled_gelu = torch.compile(manual_gelu)
+compiled_time = profile("compiled_gelu", run_operation1(dim=16384, operation=compiled_gelu)) 
+print(compiled_time)
+'''
+# so we have seen 5 methods till now for writing kernels 
+
+manual methods
+pytorch method
+cuda kernel method 
+triton method 
+compiled method 
+
+'''
